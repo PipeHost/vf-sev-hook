@@ -1,0 +1,112 @@
+<?php
+
+const VF_URL      = 'VIRTFUSION_URL';
+const VF_TOKEN    = 'API_TOKEN';
+const OVMF_PATH   = '/usr/local/share/ovmf/ovmf.amdsev.fd';
+const CBITPOS     = 51;
+const RPB         = 1;
+const SNP_POLICY  = '0x00030000';
+const HEADROOM_MIB = 1024;
+const SNP_LOG     = '/var/log/vf-snp-hook.log';
+
+function snp_log(string $msg): void
+{
+    file_put_contents(SNP_LOG, date('c') . ' ' . $msg . "\n", FILE_APPEND);
+}
+
+function snp_host_capable(): bool
+{
+    $f = '/sys/module/kvm_amd/parameters/sev_snp';
+    return is_readable($f) && trim(file_get_contents($f)) === 'Y';
+}
+
+function snp_domain_xml(int $hardLimitKib): string
+{
+    $c = CBITPOS; $r = RPB; $p = SNP_POLICY;
+    return <<<XML
+<memoryBacking>
+  <source type='memfd'/>
+  <access mode='shared'/>
+</memoryBacking>
+<memtune>
+  <hard_limit unit='KiB'>{$hardLimitKib}</hard_limit>
+</memtune>
+<launchSecurity type='sev-snp'>
+  <cbitpos>{$c}</cbitpos>
+  <reducedPhysBits>{$r}</reducedPhysBits>
+  <policy>{$p}</policy>
+</launchSecurity>
+XML;
+}
+
+function snp_os_xml(): string
+{
+    return "<loader type='rom' stateless='yes' format='raw'>" . OVMF_PATH . "</loader>";
+}
+
+function snp_api_set(int $serverId, int $hardLimitKib): bool
+{
+    $payload = [
+        'domain'          => snp_domain_xml($hardLimitKib),
+        'domainEnabled'   => true,
+        'os'              => snp_os_xml(),
+        'osEnabled'       => true,
+        'devices'         => '',
+        'devicesEnabled'  => false,
+        'features'        => '',
+        'featuresEnabled' => false,
+        'clock'           => '',
+        'clockEnabled'    => false,
+        'cpuTune'         => '',
+        'cpuTuneEnabled'  => false,
+    ];
+
+    $ch = curl_init(VF_URL . '/api/v1/servers/' . $serverId . '/customXML');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_HTTPHEADER     => [
+            'Authorization: Bearer ' . VF_TOKEN,
+            'Content-Type: application/json',
+            'Accept: application/json',
+        ],
+    ]);
+    $raw  = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+
+    if ($code < 200 || $code >= 300) {
+        snp_log("API failed server={$serverId} http={$code} err={$err} body=" . substr((string)$raw, 0, 300));
+        return false;
+    }
+    return true;
+}
+
+function event($data)
+{
+    if (!property_exists($data, 'uuid')) return;
+    if (!property_exists($data, 'id')) return;
+
+    if (!snp_host_capable()) return;
+
+    $uuid     = $data->uuid;
+    $serverId = (int)$data->id;
+
+    $memMib = null;
+    if (property_exists($data, 'settings') && isset($data->settings->resources->memory)) {
+        $memMib = (int)$data->settings->resources->memory;
+    }
+    if (!$memMib) {
+        snp_log("no memory value for {$uuid}, aborting");
+        return;
+    }
+    $hardLimitKib = ($memMib + HEADROOM_MIB) * 1024;
+
+    $api = snp_api_set($serverId, $hardLimitKib);
+
+    snp_log("uuid={$uuid} id={$serverId} mem={$memMib}MiB limit={$hardLimitKib}KiB api=" .
+        ($api ? 'ok' : 'FAIL') . " file=" . ($file ? 'ok' : 'FAIL'));
+}
