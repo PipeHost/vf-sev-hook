@@ -54,3 +54,9 @@ Before deploying, set the following constants at the top of the hook:
 - `SNP_LOG`: path to the hook's log file.
 
 This hook should be placed in `/home/vf-data/events/hypervisor/`
+
+## Native support
+
+There's an open feature request asking VirtFusion to add AMD SEV-SNP and Intel TDX support
+natively: <https://virtfusion.featureos.app/p/add-amd-sev-snp-and-intel-tdx-options>. Native
+support would obviously be a lot better than this hook. If you think this matters, go upvote it.
